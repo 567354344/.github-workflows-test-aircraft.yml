@@ -1,5 +1,4 @@
-
-name: Aircraft CURL Verification
+name: Aircraft KV Write Test
 
 on:
   workflow_dispatch:
@@ -7,46 +6,71 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
-
+    timeout-minutes: 3
     steps:
-      - name: Verify adsb.fi with CURL
+      - name: Fetch real aircraft and publish to Cloudflare KV
         shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: 8ca161cf962a91c46601ed6a3bfd0370
+          CF_KV_NAMESPACE_ID: a705ebb7162047aa9167fc38df818396
         run: |
           set -euo pipefail
-
-          URL="https://opendata.adsb.fi/api/v3/lat/45.5/lon/10.8/dist/100"
-
-          echo "Testing aircraft API with curl"
-
-          HTTP_CODE=$(curl \
-            --silent \
-            --show-error \
-            --location \
-            --max-time 20 \
-            --output /tmp/aircraft.json \
-            --write-out "%{http_code}" \
-            "$URL")
-
-          echo "HTTP_STATUS=$HTTP_CODE"
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "ERROR: Provider refused the request"
-            exit 1
-          fi
+          test -n "$CLOUDFLARE_API_TOKEN"
+          curl --fail --silent --show-error --location --max-time 25 \
+            'https://opendata.adsb.fi/api/v3/lat/45.5/lon/10.8/dist/100' \
+            -o /tmp/adsb_source.json
 
           python3 - <<'PY'
-          import json
-
-          with open("/tmp/aircraft.json") as f:
+          import json, datetime
+          with open('/tmp/adsb_source.json', encoding='utf-8') as f:
               data = json.load(f)
+          ac = data.get('ac')
+          if not isinstance(ac, list):
+              raise SystemExit('ERROR: missing aircraft list')
+          aircraft = []
+          for a in ac:
+              if not isinstance(a, dict):
+                  continue
+              lat, lon = a.get('lat'), a.get('lon')
+              if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+                  continue
+              aircraft.append({
+                  'hex': a.get('hex', ''),
+                  'callsign': str(a.get('flight') or '').strip(),
+                  'lat': lat, 'lon': lon,
+                  'altitude_ft': a.get('alt_baro') if isinstance(a.get('alt_baro'), (int, float)) else None,
+                  'speed_kt': a.get('gs') if isinstance(a.get('gs'), (int, float)) else None,
+                  'track': a.get('track') if isinstance(a.get('track'), (int, float)) else None,
+              })
+          if not aircraft:
+              raise SystemExit('ERROR: no aircraft with valid coordinates; refusing to overwrite KV')
+          payload = {
+              'source': 'adsb.fi',
+              'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'count': len(aircraft),
+              'aircraft': aircraft,
+              'status': 'ok'
+          }
+          with open('/tmp/aircraft_payload.json', 'w', encoding='utf-8') as f:
+              json.dump(payload, f, separators=(',', ':'))
+          print('AIRCRAFT_COUNT=', len(aircraft))
+          PY
 
-          aircraft = data.get("ac")
-
-          if not isinstance(aircraft, list):
-              raise ValueError("Invalid aircraft JSON")
-
-          print("JSON_VALID=True")
-          print("AIRCRAFT_COUNT=", len(aircraft))
-          print("STATUS=OK")
+          HTTP_CODE=$(curl --silent --show-error --location --max-time 25 \
+            --output /tmp/cf_response.json --write-out '%{http_code}' \
+            --request PUT \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --header 'Content-Type: application/json' \
+            --data-binary @/tmp/aircraft_payload.json \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_KV_NAMESPACE_ID}/values/aircraft_latest")
+          echo "CLOUDFLARE_HTTP_STATUS=$HTTP_CODE"
+          python3 - <<'PY'
+          import json
+          with open('/tmp/cf_response.json', encoding='utf-8') as f:
+              result = json.load(f)
+          print('CLOUDFLARE_SUCCESS=', result.get('success'))
+          if not result.get('success'):
+              print('CLOUDFLARE_ERRORS=', result.get('errors'))
+              raise SystemExit(1)
           PY

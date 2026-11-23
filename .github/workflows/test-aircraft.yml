@@ -1,65 +1,52 @@
 
-name: Aircraft Acquisition Test
+name: Aircraft CURL Verification
 
 on:
   workflow_dispatch:
 
 jobs:
-  aircraft:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 2
 
     steps:
-      - name: Acquire aircraft every 60 seconds
+      - name: Verify adsb.fi with CURL
         shell: bash
         run: |
+          set -euo pipefail
+
+          URL="https://opendata.adsb.fi/api/v3/lat/45.5/lon/10.8/dist/100"
+
+          echo "Testing aircraft API with curl"
+
+          HTTP_CODE=$(curl \
+            --silent \
+            --show-error \
+            --location \
+            --max-time 20 \
+            --output /tmp/aircraft.json \
+            --write-out "%{http_code}" \
+            "$URL")
+
+          echo "HTTP_STATUS=$HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Provider refused the request"
+            exit 1
+          fi
+
           python3 - <<'PY'
           import json
-          import time
-          import urllib.request
-          from datetime import datetime, timezone
 
-          url = (
-              "https://opendata.adsb.fi/api/v3/"
-              "lat/45.5/lon/10.8/dist/100"
-          )
+          with open("/tmp/aircraft.json") as f:
+              data = json.load(f)
 
-          for i in range(3):
-              print("Acquisition", i + 1, flush=True)
+          aircraft = data.get("ac")
 
-              try:
-                  req = urllib.request.Request(
-                      url,
-                      headers={"Accept": "application/json"}
-                  )
+          if not isinstance(aircraft, list):
+              raise ValueError("Invalid aircraft JSON")
 
-                  with urllib.request.urlopen(
-                      req, timeout=20
-                  ) as response:
-                      data = json.load(response)
-
-                  aircraft = data.get("ac", [])
-
-                  print(
-                      "UTC:",
-                      datetime.now(timezone.utc).isoformat(),
-                      flush=True
-                  )
-
-                  print(
-                      "AIRCRAFT_COUNT:",
-                      len(aircraft),
-                      flush=True
-                  )
-
-                  print(
-                      "STATUS: OK",
-                      flush=True
-                  )
-
-              except Exception as e:
-                  print("ERROR:", str(e), flush=True)
-
-              if i < 2:
-                  time.sleep(60)
+          print("JSON_VALID=True")
+          print("AIRCRAFT_COUNT=", len(aircraft))
+          print("STATUS=OK")
           PY

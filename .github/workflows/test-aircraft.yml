@@ -1,0 +1,42 @@
+
+name: Test Aircraft API
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Test adsb.fi connection
+        shell: bash
+        run: |
+          URL="https://opendata.adsb.fi/api/v3/lat/45.5/lon/10.8/dist/100"
+
+          echo "Testing adsb.fi from GitHub Actions"
+
+          HTTP_CODE=$(curl \
+            --silent \
+            --show-error \
+            --location \
+            --max-time 20 \
+            --output /tmp/aircraft.json \
+            --write-out "%{http_code}" \
+            "$URL")
+
+          echo "HTTP_STATUS=$HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            python3 - <<'PY'
+          import json
+          with open("/tmp/aircraft.json") as f:
+              data = json.load(f)
+          aircraft = data.get("ac", [])
+          print("JSON_VALID=True")
+          print("AIRCRAFT_COUNT=", len(aircraft))
+          PY
+          else
+            echo "Provider did not return HTTP 200"
+          fi
